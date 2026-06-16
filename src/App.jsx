@@ -7,7 +7,6 @@ import { supabase } from "./supabaseClient";
 // Import icons used in the interface
 import {
   ShoppingCart,
-  Plus,
   Trash2,
   Pencil,
   LogOut,
@@ -169,6 +168,9 @@ export default function App() {
   // Controls which page tab is shown
   const [tab, setTab] = useState("menu");
 
+  // Controls whether the account page shows login or signup
+  const [authMode, setAuthMode] = useState("login");
+
   // Stores product, order, and admin data from Supabase
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -226,16 +228,18 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Checks admin status and loads admin data
+  // Checks admin status whenever the session changes
   useEffect(() => {
     checkAdmin();
+  }, [session]);
 
-    // Only admins can load orders and admin accounts
+  // Loads admin data only after the user has been confirmed as admin
+  useEffect(() => {
     if (isAdmin) {
       fetchOrders();
       fetchAdmins();
     }
-  }, [session, isAdmin]);
+  }, [isAdmin]);
 
   // Checks if the logged-in user exists in the admins table
   async function checkAdmin() {
@@ -260,7 +264,11 @@ export default function App() {
       .select("*, canteen_product_images(*)")
       .order("created_at", { ascending: false });
 
-    if (!error) setProducts(data || []);
+    if (!error) {
+      setProducts(data || []);
+    } else {
+      setMessage(error.message);
+    }
   }
 
   // Fetches customer orders for admin dashboard
@@ -270,7 +278,11 @@ export default function App() {
       .select("*, canteen_order_items(*)")
       .order("created_at", { ascending: false });
 
-    if (!error) setOrders(data || []);
+    if (!error) {
+      setOrders(data || []);
+    } else {
+      setMessage(error.message);
+    }
   }
 
   // Fetches all admin accounts
@@ -280,7 +292,11 @@ export default function App() {
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (!error) setAdmins(data || []);
+    if (!error) {
+      setAdmins(data || []);
+    } else {
+      setMessage(error.message);
+    }
   }
 
   // Filters products by selected category and search text
@@ -289,7 +305,9 @@ export default function App() {
       const okCategory = category === "All" || p.category === category;
       const okSearch =
         !search ||
-        `${p.name} ${p.description}`.toLowerCase().includes(search.toLowerCase());
+        `${p.name || ""} ${p.description || ""}`
+          .toLowerCase()
+          .includes(search.toLowerCase());
 
       return okCategory && okSearch;
     });
@@ -332,7 +350,8 @@ export default function App() {
     const urls = [];
 
     for (const file of files) {
-      const path = `${productId}/${Date.now()}-${file.name}`;
+      const cleanFileName = file.name.replace(/\s+/g, "-").toLowerCase();
+      const path = `${productId}/${Date.now()}-${cleanFileName}`;
 
       const { error } = await supabase.storage
         .from("canteen-images")
@@ -344,6 +363,8 @@ export default function App() {
           .getPublicUrl(path);
 
         urls.push(data.publicUrl);
+      } else {
+        setMessage(error.message);
       }
     }
 
@@ -375,7 +396,12 @@ export default function App() {
 
     // Update existing product
     if (editingId) {
-      await supabase.from("canteen_products").update(payload).eq("id", editingId);
+      const { error } = await supabase
+        .from("canteen_products")
+        .update(payload)
+        .eq("id", editingId);
+
+      if (error) return setMessage(error.message);
     } else {
       // Insert new product
       const { data, error } = await supabase
@@ -411,8 +437,14 @@ export default function App() {
   // Deletes a product after confirmation
   async function deleteProduct(id) {
     if (confirm("Delete this item?")) {
-      await supabase.from("canteen_products").delete().eq("id", id);
-      fetchProducts();
+      const { error } = await supabase.from("canteen_products").delete().eq("id", id);
+
+      if (error) {
+        setMessage(error.message);
+      } else {
+        fetchProducts();
+        setMessage("Product deleted successfully.");
+      }
     }
   }
 
@@ -440,7 +472,7 @@ export default function App() {
     if (error) return setMessage(error.message);
 
     // Save each basket item as an order item
-    await supabase.from("canteen_order_items").insert(
+    const { error: itemError } = await supabase.from("canteen_order_items").insert(
       cart.map((item) => ({
         order_id: data.id,
         product_id: item.id,
@@ -450,6 +482,8 @@ export default function App() {
       }))
     );
 
+    if (itemError) return setMessage(itemError.message);
+
     // Build WhatsApp message text
     const lines = cart
       .map(
@@ -458,10 +492,11 @@ export default function App() {
       )
       .join("%0A");
 
-    const text = `Stagecoach Canteen Order%0AName: ${customer.name}%0APhone: ${customer.phone
-      }%0ADepartment: ${customer.department || "N/A"}%0A%0A${lines}%0A%0ATotal: ${money(
-        total
-      )}%0ANotes: ${customer.notes || "None"}`;
+    const text = `Stagecoach Canteen Order%0AName: ${customer.name}%0APhone: ${
+      customer.phone
+    }%0ADepartment: ${customer.department || "N/A"}%0A%0A${lines}%0A%0ATotal: ${money(
+      total
+    )}%0ANotes: ${customer.notes || "None"}`;
 
     // Open WhatsApp so customer can send the order
     window.open(`https://wa.me/${WHATSAPP_NUMBER}?text=${text}`, "_blank");
@@ -474,8 +509,10 @@ export default function App() {
   }
 
   // Creates a new employee account
-  async function signup(e) {
-    e.preventDefault();
+  async function signup() {
+    if (!auth.fullName || !auth.email || !auth.password) {
+      return setMessage("Please enter your full name, email, and password.");
+    }
 
     const { error } = await supabase.auth.signUp({
       email: auth.email,
@@ -485,19 +522,31 @@ export default function App() {
       }
     });
 
-    setMessage(error ? error.message : "Account created. You can now log in.");
+    if (error) {
+      setMessage(error.message);
+    } else {
+      setMessage("Account created successfully. You can now log in.");
+      setAuthMode("login");
+    }
   }
 
-  // Logs in an employee
-  async function login(e) {
-    e.preventDefault();
+  // Logs in an existing employee account
+  async function login() {
+    if (!auth.email || !auth.password) {
+      return setMessage("Please enter your email and password to log in.");
+    }
 
     const { error } = await supabase.auth.signInWithPassword({
       email: auth.email,
       password: auth.password
     });
 
-    setMessage(error ? error.message : "Signed in.");
+    if (error) {
+      setMessage(error.message);
+    } else {
+      setMessage("Logged in successfully.");
+      setTab("menu");
+    }
   }
 
   // Adds a new admin email
@@ -524,8 +573,14 @@ export default function App() {
   // Removes admin access from an email
   async function removeAdmin(email) {
     if (confirm(`Remove admin access for ${email}?`)) {
-      await supabase.from("admins").delete().eq("email", email);
-      fetchAdmins();
+      const { error } = await supabase.from("admins").delete().eq("email", email);
+
+      if (error) {
+        setMessage(error.message);
+      } else {
+        fetchAdmins();
+        setMessage("Admin removed successfully.");
+      }
     }
   }
 
@@ -535,7 +590,7 @@ export default function App() {
       <header className="hero">
         <div className="wrap topbar">
           <div className="brand">
-            <img src="/stagecoach-logo.png" />
+            <img src="/stagecoach-logo.png" alt="Stagecoach Canteen logo" />
             <div>
               <h1>Stagecoach Canteen</h1>
               <p>Employee meal ordering service</p>
@@ -549,7 +604,7 @@ export default function App() {
             </button>
 
             <button className="btn btn-light" onClick={() => setTab("account")}>
-              Employee Sign Up
+              Employee Account
             </button>
 
             {isAdmin && (
@@ -605,7 +660,13 @@ export default function App() {
               <div className="grid">
                 {filteredProducts.map((p) => (
                   <article className="card" key={p.id}>
-                    <img src={p.image_url || "/stagecoach-logo.png"} />
+                    <img
+                      src={p.image_url || "/stagecoach-logo.png"}
+                      alt={p.name}
+                      onError={(e) => {
+                        e.currentTarget.src = "/stagecoach-logo.png";
+                      }}
+                    />
 
                     <div className="card-body">
                       <div className="row">
@@ -638,23 +699,50 @@ export default function App() {
           {tab === "account" && (
             <div className="auth-box">
               <h2>Employee Account</h2>
-              <p className="muted">Employees can sign up and then order meals.</p>
+              <p className="muted">
+                Employees can log in with email and password, or create a new account.
+              </p>
 
-              <form className="admin-grid" onSubmit={signup}>
+              {/* Login and signup switch */}
+              <div className="auth-buttons">
+                <button
+                  type="button"
+                  className={authMode === "login" ? "btn btn-dark" : "btn btn-light"}
+                  onClick={() => setAuthMode("login")}
+                >
+                  Login
+                </button>
+
+                <button
+                  type="button"
+                  className={authMode === "signup" ? "btn btn-dark" : "btn btn-light"}
+                  onClick={() => setAuthMode("signup")}
+                >
+                  Sign Up
+                </button>
+              </div>
+
+              <form className="admin-grid">
+                {/* Full name is only shown when creating a new employee account */}
+                {authMode === "signup" && (
+                  <input
+                    className="input"
+                    placeholder="Full name"
+                    value={auth.fullName}
+                    onChange={(e) => setAuth({ ...auth, fullName: e.target.value })}
+                  />
+                )}
+
+                {/* Email is used for both login and signup */}
                 <input
                   className="input"
-                  placeholder="Full name"
-                  value={auth.fullName}
-                  onChange={(e) => setAuth({ ...auth, fullName: e.target.value })}
-                />
-
-                <input
-                  className="input"
+                  type="email"
                   placeholder="Email"
                   value={auth.email}
                   onChange={(e) => setAuth({ ...auth, email: e.target.value })}
                 />
 
+                {/* Password is used for both login and signup */}
                 <input
                   className="input"
                   type="password"
@@ -663,12 +751,20 @@ export default function App() {
                   onChange={(e) => setAuth({ ...auth, password: e.target.value })}
                 />
 
-                <button className="btn btn-gold">Sign Up</button>
-              </form>
+                {/* Login button only appears in login mode */}
+                {authMode === "login" && (
+                  <button type="button" className="btn btn-dark" onClick={login}>
+                    Login
+                  </button>
+                )}
 
-              <button className="btn btn-dark" onClick={login}>
-                Login with these details
-              </button>
+                {/* Signup button only appears in signup mode */}
+                {authMode === "signup" && (
+                  <button type="button" className="btn btn-gold" onClick={signup}>
+                    Create Account
+                  </button>
+                )}
+              </form>
             </div>
           )}
 
